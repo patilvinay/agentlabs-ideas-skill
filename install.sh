@@ -33,8 +33,8 @@ else warn "missing: ${missing[*]}"; warn "  sudo apt-get install -y ${missing[*]
 say "Python environment at $VENV"
 [ -d "$VENV" ] || python3 -m venv "$VENV"
 "$VENV/bin/pip" install --quiet --upgrade pip
-"$VENV/bin/pip" install --quiet markdown-it-py mdit-py-plugins pygments
-ok "markdown-it-py, mdit-py-plugins, pygments"
+"$VENV/bin/pip" install --quiet markdown-it-py mdit-py-plugins pygments linkify-it-py
+ok "markdown-it-py, mdit-py-plugins, pygments, linkify-it-py"
 
 say "Installing to $HOOKS, $BINDIR and $LIBDIR"
 mkdir -p "$HOOKS" "$BINDIR" "$LIBDIR" "$HOME/.config/agentlabs"
@@ -66,6 +66,26 @@ if command -v jq >/dev/null 2>&1; then
   ' "$SETTINGS" > "$tmp" && mv "$tmp" "$SETTINGS"
   ok "Stop hook registered (yours are left alone)"
 else warn "jq not found — register hooks/wave-view.sh yourself, see the README"; fi
+
+# ------------------------------------------------------------------ smoke test
+# Render one page for real. A missing parser dependency only surfaces per
+# request, so an install can otherwise look perfect and fail the first time you
+# press the key -- which is exactly how linkify-it-py was missed once.
+say "Checking the renderer"
+_port=$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()')
+"$BINDIR/md-server" --port "$_port" >/tmp/agentlabs-smoke.log 2>&1 &
+_pid=$!
+for _ in $(seq 40); do curl -sf "http://127.0.0.1:$_port/" >/dev/null 2>&1 && break; sleep 0.1; done
+_probe=$(mktemp --suffix=.md); printf '# check\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n```python\nx = 1\n```\n' > "$_probe"
+_sid=$(ls -1 "${AGENTLABS_SESSIONS:-$HOME/.claude/scratch}" 2>/dev/null | head -1)
+if [ -n "$_sid" ]; then
+  _code=$(curl -so /dev/null -w '%{http_code}' "http://127.0.0.1:$_port/s/$_sid" || echo 000)
+else
+  _code=$(curl -so /dev/null -w '%{http_code}' "http://127.0.0.1:$_port/" || echo 000)
+fi
+kill "$_pid" 2>/dev/null; rm -f "$_probe"
+if [ "$_code" = 200 ]; then ok "renderer works (HTTP 200)"
+else warn "renderer returned $_code — see /tmp/agentlabs-smoke.log"; fi
 
 say "Adding key bindings to $TMUXCONF"
 touch "$TMUXCONF"; sed -i "/$MARK_BEGIN/,/$MARK_END/d" "$TMUXCONF"
