@@ -2,7 +2,7 @@
 # Stop hook: push a <view>…</view> block to the panel the browser view shows.
 #
 # Mirrors the <voice> convention: <voice> is for the ear, <view> is for the
-# Wave panel. The reply on screen stays whatever it needs to be; the panel gets
+# panel. The reply on screen stays whatever it needs to be; the panel gets
 # markdown authored for it — tables, checklists, diagrams worth keeping in sight.
 #
 # Same two races as speak-last.sh, so the same defence:
