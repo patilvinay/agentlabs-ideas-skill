@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Optional extra. Not run by install.sh: it installs a package, so opt in
+# deliberately.
+#
+#   md-extras raise       wmctrl, so prefix+w brings the browser tab to the front
+#
+# Terminal renderers (frogmouth, glow, chafa) and the gnome-terminal sixel
+# switch used to live here. They were removed with the floating panes.
+set -uo pipefail
+say() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
+
+raise_win() {
+  # Without this the browser tab still follows prefix+w, it just does not come
+  # forward -- nothing in the page can raise its own window.
+  if command -v wmctrl >/dev/null || command -v xdotool >/dev/null; then
+    say "window raising already available"
+  else
+    say "installing wmctrl (needs sudo)"
+    sudo apt-get install -y wmctrl
+  fi
+}
+
+case "${1:-raise}" in
+  raise|all) raise_win ;;
+  *) sed -n '2,10p' "$0" | sed 's/^# \?//' ;;
+esac

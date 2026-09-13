@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# Show this pane's session in the browser. tmux prefix + w.
+#
+#   md-web [PANE_ID]
+#
+# One tab, not one per keypress. The open page polls /api/tick; this sets the
+# server's focus, and the page notices and navigates itself. A browser is only
+# launched when no tab is polling — so pressing the key repeatedly, or from
+# different sessions, reuses the same tab.
+#
+# Raising that tab to the front needs a window manager tool; if wmctrl or
+# xdotool is installed it is used, otherwise the tab updates in place and you
+# switch to it yourself (install with: sudo apt install wmctrl).
+set -uo pipefail
+port="${MD_WEB_PORT:-7677}"
+srv="$HOME/.local/bin/md-server"
+log="${XDG_RUNTIME_DIR:-/tmp}/md-server.log"
+
+sid=$(basename "$(session-dir "${1:-${TMUX_PANE:-}}" 2>/dev/null)") || {
+  echo "md-web: no session for this pane" >&2; exit 1; }
+
+up() { (exec 3<>/dev/tcp/127.0.0.1/"$port") 2>/dev/null; }
+
+if ! up; then
+  setsid "$srv" --port "$port" >"$log" 2>&1 &
+  for _ in $(seq 40); do up && break; sleep 0.1; done
+fi
+
+url="http://127.0.0.1:$port/s/$sid"
+[ -n "${MD_WEB_PRINT:-}" ] && { printf '%s\n' "$url"; exit 0; }
+
+# Point the (possibly already open) tab at this session.
+cwd=$(tmux display -p -t "${1:-}" '#{pane_current_path}' 2>/dev/null || pwd)
+tab=$(curl -s --max-time 2 --get \
+      --data-urlencode "sid=$sid" --data-urlencode "cwd=$cwd" \
+      "http://127.0.0.1:$port/api/focus" \
+      | grep -o '"tab": *true' || true)
+
+if [ -n "$tab" ]; then
+  # A tab is polling: it will navigate on its own. Just try to raise it.
+  if command -v wmctrl >/dev/null;  then wmctrl -a 'md-server' 2>/dev/null || true
+  elif command -v xdotool >/dev/null; then
+    xdotool search --name 'md-server' windowactivate 2>/dev/null | tail -1 >/dev/null || true
+  fi
+  tmux display-message "browser tab → $(session-title "$sid" 2>/dev/null || echo "$sid")" 2>/dev/null || true
+else
+  command -v xdg-open >/dev/null && xdg-open "$url" >/dev/null 2>&1 &
+  tmux display-message "opened browser → $(session-title "$sid" 2>/dev/null || echo "$sid")" 2>/dev/null || true
+fi
+printf '%s\n' "$url"

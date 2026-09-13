@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# Session scratchpad: draft → review → approved → shipped.
+#
+#   sess               list this session's files by stage
+#   sess path          print the session directory
+#   sess new NAME      create a draft in 00-scratch
+#   sess review FILE   00-scratch  -> 10-review
+#   sess approve FILE  10-review   -> 20-approved
+#   sess ship FILE DIR 20-approved -> DIR (your real docs, git-tracked)
+#   sess open          open the navigator on this session
+#
+# FILE may be a bare name; the stage directory is implied by the verb.
+set -uo pipefail
+d=$(session-dir) || exit 1
+S="$d/00-scratch"; R="$d/10-review"; A="$d/20-approved"
+
+find_in() { local dir="$1" f="$2"; [ -f "$dir/$f" ] && { printf '%s' "$dir/$f"; return; }
+            [ -f "$f" ] && { printf '%s' "$f"; return; }
+            printf '%s' "$dir/${f%.md}.md"; }
+
+move() { local from="$1" to="$2" f="$3" src
+  src=$(find_in "$from" "$f")
+  [ -f "$src" ] || { echo "sess: not found in $(basename "$from"): $f" >&2; exit 1; }
+  mkdir -p "$to"; mv -n "$src" "$to/" && echo "→ $to/$(basename "$src")"; }
+
+case "${1:-ls}" in
+  path) printf '%s\n' "$d" ;;
+  ls|"")
+    for stage in "$S:draft" "$R:review" "$A:approved"; do
+      dir=${stage%%:*}; name=${stage##*:}
+      printf '\n%s  (%s)\n' "$name" "${dir/#$HOME/\~}"
+      n=0; for f in "$dir"/*; do [ -f "$f" ] || continue
+        printf '  %-40s %6s B  %s\n' "$(basename "$f")" "$(stat -c %s "$f")" "$(date -d @"$(stat -c %Y "$f")" '+%b %d %H:%M')"; n=$((n+1)); done
+      [ "$n" = 0 ] && printf '  (empty)\n'
+    done; echo ;;
+  new)  f="${2:?usage: sess new NAME}"; f="${f%.md}.md"; mkdir -p "$S"
+        [ -f "$S/$f" ] || printf '# %s\n\n_draft — %s_\n\n' "${2%.md}" "$(date '+%b %d %H:%M')" > "$S/$f"
+        printf '%s\n' "$S/$f" ;;
+  review)  move "$S" "$R" "${2:?usage: sess review FILE}" ;;
+  approve) move "$R" "$A" "${2:?usage: sess approve FILE}" ;;
+  ship)    dest="${3:?usage: sess ship FILE DEST_DIR}"; mkdir -p "$dest"
+           src=$(find_in "$A" "${2}")
+           [ -f "$src" ] || { echo "sess: not approved yet: $2" >&2; exit 1; }
+           cp -n "$src" "$dest/" && echo "shipped → $dest/$(basename "$src")" ;;
+  open)    md-popup-index "$d" ;;
+  *) sed -n '2,14p' "$0" | sed 's/^# \?//' ;;
+esac

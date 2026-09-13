@@ -1,0 +1,386 @@
+#!/usr/bin/env python3
+# Runs on the system python, borrowing the render venv's packages. The venv
+# path is NOT baked in: a shebang pointing at /home/<someone>/.venvs would make
+# this file useless on any other machine. Override with MD_VENV.
+import glob as _glob, os as _os, sys as _sys
+_stamp = _os.path.expanduser("~/.config/agentlabs/md-venv")
+_default = open(_stamp).read().strip() if _os.path.exists(_stamp) else _os.path.expanduser("~/.venvs/agentlabs-md")
+_venv = _os.environ.get("MD_VENV", _default)
+for _sp in sorted(_glob.glob(_os.path.join(_venv, "lib", "python3.*", "site-packages"))):
+    if _sp not in _sys.path:
+        _sys.path.insert(0, _sp)
+"""One small localhost server that renders session markdown and source as HTML.
+
+Why a server rather than generating files: it is shared by every session, it
+can render on demand (so content is never stale), and a browser gives what a
+terminal cannot — real SVG, real images, selectable text, proper tables.
+
+  md-server [--port N] [--foreground]
+
+Routes
+  /                       sessions it knows about
+  /s/<sid>                one session: stages, then cwd markdown, then repo
+  /s/<sid>/view?p=PATH    a rendered file
+  /raw?p=PATH             raw bytes, for <img> (SVG included)
+  /api/mtime?p=PATH       polled by the page so it refreshes when a file changes
+
+Safety: binds 127.0.0.1 only, and every path is resolved and checked against
+ROOTS before being read. Without that this would be an arbitrary-file-read
+service listening on the loopback interface.
+"""
+import argparse, html, http.server, json, mimetypes, os, socket, socketserver, subprocess, time, urllib.parse
+from pathlib import Path
+
+HOME = Path.home()
+# Always readable: this project's own directories.
+SESSIONS = Path(os.environ.get("AGENTLABS_SESSIONS", HOME/".claude/scratch"))
+VIEWDIR  = Path(os.environ.get("AGENTLABS_VIEW", HOME/".claude/wave"))
+# Always readable: this project's own directories.
+ROOTS = [SESSIONS, VIEWDIR, HOME/".claude/demo"]
+# Plus wherever the panes actually are. Hardcoding ~/workspace assumed one
+# person's layout; a pane in ~/code or /srv/app would have got 404s for its own
+# files. md-web sends its cwd, and that directory (and the git repo containing
+# it) becomes readable for as long as the server runs.
+EXTRA_ROOTS: set = set()
+
+
+def add_root(p: str) -> None:
+    try:
+        d = Path(p).expanduser().resolve()
+    except Exception:
+        return
+    if not d.is_dir():
+        return
+    EXTRA_ROOTS.add(d)
+    try:
+        top = subprocess.run(["git", "-C", str(d), "rev-parse", "--show-toplevel"],
+                             capture_output=True, text=True, timeout=5)
+        if top.returncode == 0 and top.stdout.strip():
+            EXTRA_ROOTS.add(Path(top.stdout.strip()).resolve())
+    except Exception:
+        pass
+PORT = int(os.environ.get("MD_WEB_PORT", "7677"))
+IMAGE_EXT = {".svg", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".bmp", ".ico"}
+
+# One browser tab, not one per keypress. The page polls /api/tick, which both
+# records that a tab is alive and reports which session it should be showing.
+# Pressing the key sets FOCUS; the open tab notices and navigates itself.
+FOCUS = {"sid": None, "seq": 0}
+CWD = {}          # sid -> the pane's working directory, for the file list
+SEEN = {"at": 0.0}
+TAB_ALIVE_SECS = 6.0
+
+from markdown_it import MarkdownIt
+from mdit_py_plugins.anchors import anchors_plugin
+from pygments import highlight
+from pygments.lexers import get_lexer_for_filename, get_lexer_by_name, TextLexer
+from pygments.formatters import HtmlFormatter
+
+# html=True so a document can drop in an inline <svg> (or any markup) and have
+# it rendered. These are local files you and Claude wrote, served to localhost.
+FMT = HtmlFormatter(style="monokai", nowrap=False, cssclass="hl")
+FMT_INLINE = HtmlFormatter(style="monokai", nowrap=True)
+
+
+def fence(code: str, lang: str, attrs) -> str:
+    """Render a fenced block.
+
+    mermaid becomes a <pre class="mermaid"> for the client-side renderer;
+    everything else is highlighted by pygments. markdown-it uses the returned
+    string verbatim only when it starts with '<pre', otherwise it wraps it in
+    its own <pre><code> — hence the manual <pre> here rather than pygments'
+    default <div> wrapper.
+    """
+    if (lang or "").strip().lower() == "mermaid":
+        return f'<pre class="mermaid">{html.escape(code)}</pre>'
+    try:
+        lx = get_lexer_by_name(lang) if lang else TextLexer()
+    except Exception:
+        lx = TextLexer()
+    return f'<pre class="hl"><code>{highlight(code, lx, FMT_INLINE)}</code></pre>'
+
+
+MD = (MarkdownIt("gfm-like", {"html": True, "linkify": True, "highlight": fence})
+      .use(anchors_plugin))
+
+CSS = """
+:root{--bg:#14161c;--panel:#1a1d26;--edge:#272b36;--fg:#d7dae3;--dim:#8b93a7;
+--accent:#7aa2f7;--green:#9ece6a;--yellow:#e0af68;--pink:#f7768e}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);
+font:15px/1.65 ui-sans-serif,system-ui,"Inter",sans-serif}
+.wrap{display:grid;grid-template-columns:290px 1fr;min-height:100vh}
+aside{background:var(--panel);border-right:1px solid var(--edge);padding:18px 16px;
+position:sticky;top:0;height:100vh;overflow:auto}
+aside h1{font-size:15px;margin:0 0 4px;color:var(--accent);word-break:break-word}
+aside .sub{color:var(--dim);font-size:12px;margin-bottom:16px}
+aside h2{font-size:11px;text-transform:uppercase;letter-spacing:.09em;color:var(--dim);
+margin:18px 0 7px;font-weight:600}
+aside a{display:block;color:var(--fg);text-decoration:none;padding:4px 8px;border-radius:6px;
+font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+aside a:hover{background:#232735}
+aside a.on{background:#2a3350;color:#fff}
+main{padding:34px 44px;max-width:1100px}
+main img,main svg{max-width:100%;height:auto;border-radius:8px;background:#fff0}
+h1,h2,h3{line-height:1.25}
+main>h1:first-child{margin-top:0}
+h1{border-bottom:1px solid var(--edge);padding-bottom:.3em}
+h2{color:var(--green);margin-top:1.8em}
+h3{color:var(--yellow)}
+a{color:var(--accent)}
+table{border-collapse:collapse;width:100%;margin:1.1em 0;font-size:14px}
+th,td{border:1px solid var(--edge);padding:7px 11px;text-align:left;vertical-align:top}
+th{background:#20242f;color:var(--fg)}
+tr:nth-child(even) td{background:#181b23}
+code{background:#20242f;padding:1px 5px;border-radius:4px;font-size:13px}
+pre{background:#1b1e27;border:1px solid var(--edge);border-radius:9px;padding:14px 16px;
+overflow:auto;line-height:1.5}
+pre code{background:none;padding:0}
+blockquote{border-left:3px solid var(--accent);margin:1em 0;padding:.1em 1em;color:var(--dim)}
+.meta{color:var(--dim);font-size:12px;margin-bottom:22px}
+pre.mermaid{background:transparent;border:1px solid var(--edge);text-align:center;
+padding:18px}
+pre.mermaid svg{max-width:100%;height:auto}
+.stage{display:inline-block;font-size:11px;padding:1px 7px;border-radius:10px;margin-right:6px}
+.s0{background:#3a2f1a;color:var(--yellow)}.s1{background:#1e3040;color:var(--accent)}
+.s2{background:#1f3324;color:var(--green)}
+"""
+
+def safe(p: str) -> Path | None:
+    try: q = Path(p).expanduser().resolve()
+    except Exception: return None
+    for r in list(ROOTS) + list(EXTRA_ROOTS):
+        try:
+            q.relative_to(Path(r).resolve()); return q
+        except ValueError: continue
+    return None
+
+def sessions() -> list[tuple[str, str]]:
+    root = SESSIONS
+    out = []
+    if root.is_dir():
+        for d in sorted(root.iterdir(), key=lambda x: -x.stat().st_mtime):
+            if d.is_dir(): out.append((d.name, title_of(d.name)))
+    return out
+
+def title_of(sid: str) -> str:
+    for f in (HOME/".claude/projects").glob(f"*/{sid}/custom-title.json"):
+        try: return json.load(open(f)).get("customTitle") or sid[:8]
+        except Exception: pass
+    return sid[:8]
+
+def render_md(path: Path) -> str:
+    text = path.read_text(encoding="utf-8", errors="replace")
+    # rewrite local image paths to /raw so the browser can actually fetch them
+    body = MD.render(text)
+    import re
+    def fix(m):
+        src = m.group(1)
+        if src.startswith(("http://","https://","data:","/raw")): return m.group(0)
+        tgt = (path.parent/src).resolve()
+        return f'src="/raw?p={urllib.parse.quote(str(tgt))}"'
+    return re.sub(r'src="([^"]+)"', fix, body)
+
+def render_src(path: Path) -> str:
+    try: lex = get_lexer_for_filename(path.name)
+    except Exception: lex = TextLexer()
+    return highlight(path.read_text(encoding="utf-8", errors="replace"), lex, FMT)
+
+MERMAID = """<script type="module">
+import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+mermaid.initialize({startOnLoad:true,theme:'dark',
+  themeVariables:{background:'#14161c',primaryColor:'#1e2230',
+  primaryTextColor:'#d7dae3',lineColor:'#7aa2f7',fontSize:'15px'}});
+</script>"""
+
+
+def page(title: str, sidebar: str, body: str, watch: str = "") -> bytes:
+    # The tick does three jobs: tells the server a tab is alive, reloads this
+    # page when the file changes, and follows the key to another session.
+    poll = f"""<script>
+let last=null,seq=null;
+setInterval(async()=>{{try{{
+ const r=await fetch('/api/tick?p={urllib.parse.quote(watch)}');const j=await r.json();
+ if(seq!==null&&j.seq!==seq&&j.focus){{location.href='/s/'+j.focus;return;}}
+ seq=j.seq;
+ if(last!==null&&j.mtime!==last)location.reload();last=j.mtime;
+}}catch(e){{}}}},1200);</script>"""
+    return f"""<!doctype html><meta charset=utf-8>
+<title>{html.escape(title)} · md-server</title>
+<style>{CSS}{FMT.get_style_defs('.hl')}</style>
+<div class=wrap><aside>{sidebar}</aside><main>{body}</main></div>{poll}
+{MERMAID if 'class="mermaid"' in body else ''}""".encode()
+
+def link(href: str, label: str, on: bool = False) -> str:
+    return f'<a class="{"on" if on else ""}" href="{html.escape(href)}">{html.escape(label)}</a>'
+
+def list_md(root: Path, depth: int = 2, limit: int = 30) -> list[Path]:
+    """Markdown under a directory, newest first, skipping the usual noise."""
+    if not root.is_dir():
+        return []
+    skip = {".git", "node_modules", ".venv", "site-packages", "__pycache__"}
+    out = []
+    for p in root.rglob("*.md"):
+        if len(p.relative_to(root).parts) > depth or skip & set(p.parts):
+            continue
+        out.append(p)
+    return sorted(out, key=lambda p: -p.stat().st_mtime)[:limit]
+
+
+def repo_files(start: Path, limit: int = 200) -> tuple[str, list[Path]]:
+    """Every tracked file of the git repo containing start.
+
+    git ls-files rather than a walk: it honours .gitignore, which keeps
+    hooks/tts.conf and its API key out of the listing by construction.
+    """
+    try:
+        top = subprocess.run(["git", "-C", str(start), "rev-parse", "--show-toplevel"],
+                             capture_output=True, text=True, timeout=5)
+        if top.returncode != 0:
+            return "", []
+        root = Path(top.stdout.strip())
+        ls = subprocess.run(["git", "-C", str(root), "ls-files"],
+                            capture_output=True, text=True, timeout=10)
+        files = [root / f for f in ls.stdout.split("\n") if f]
+        return root.name, [f for f in files if f.is_file()][:limit]
+    except Exception:
+        return "", []
+
+
+def sidebar_for(sid: str, cur: str = "") -> str:
+    d = SESSIONS/sid
+    s = [f"<h1>{html.escape(title_of(sid))}</h1><div class=sub>{sid[:8]}</div>"]
+    s.append(link(f"/s/{sid}", "session overview", cur == ""))
+    for sub, name, cls in (("00-scratch","Draft","s0"),("10-review","Review","s1"),("20-approved","Approved","s2")):
+        s.append(f'<h2><span class="stage {cls}">{name}</span></h2>')
+        files = sorted((d/sub).glob("*")) if (d/sub).is_dir() else []
+        if not files: s.append('<div class=sub style="padding-left:8px">empty</div>')
+        for f in files:
+            if f.is_file():
+                s.append(link(f"/s/{sid}/view?p={urllib.parse.quote(str(f))}", f.name, str(f) == cur))
+    s.append("<h2>Panel</h2>")
+    for f in (VIEWDIR/"claude-view.md", VIEWDIR/"index.md"):
+        if f.exists(): s.append(link(f"/s/{sid}/view?p={urllib.parse.quote(str(f))}", f.name, str(f) == cur))
+    demo = HOME/".claude/demo"
+    if demo.is_dir():
+        s.append("<h2>Demos</h2>")
+        for f in sorted(demo.glob("*.md")):
+            s.append(link(f"/s/{sid}/view?p={urllib.parse.quote(str(f))}", f.name, str(f) == cur))
+
+    # Whatever directory the pane was in, and the repo around it. This is what
+    # the old terminal navigator did; it belongs here now.
+    cwd = CWD.get(sid)
+    if cwd:
+        d = Path(cwd)
+        mds = list_md(d)
+        if mds:
+            s.append(f"<h2>{html.escape(d.name)}</h2>")
+            for f in mds:
+                s.append(link(f"/s/{sid}/view?p={urllib.parse.quote(str(f))}",
+                              str(f.relative_to(d)), str(f) == cur))
+        name, files = repo_files(d)
+        if files:
+            s.append(f"<h2>{html.escape(name)} — repo</h2>")
+            root = files[0].parent
+            try:
+                root = Path(subprocess.run(["git","-C",str(d),"rev-parse","--show-toplevel"],
+                            capture_output=True, text=True, timeout=5).stdout.strip())
+            except Exception:
+                pass
+            for f in files:
+                try: label = str(f.relative_to(root))
+                except ValueError: label = f.name
+                s.append(link(f"/s/{sid}/view?p={urllib.parse.quote(str(f))}", label, str(f) == cur))
+    return "".join(s)
+
+class H(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a): pass
+
+    def send(self, data: bytes, ctype="text/html; charset=utf-8", code=200):
+        self.send_response(code); self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data))); self.end_headers()
+        self.wfile.write(data)
+
+    def do_GET(self):
+        u = urllib.parse.urlparse(self.path); q = urllib.parse.parse_qs(u.query)
+        p = u.path
+
+        if p == "/":
+            rows = "".join(f'<li>{link(f"/s/{sid}", t)}</li>' for sid, t in sessions())
+            return self.send(page("sessions", "<h1>sessions</h1>", f"<h1>Sessions</h1><ul>{rows}</ul>"))
+
+        if p in ("/api/mtime", "/api/tick"):
+            SEEN["at"] = time.time()          # a tab is open and polling
+            f = safe(q.get("p", [""])[0])
+            m = f.stat().st_mtime if f and f.exists() else 0
+            return self.send(json.dumps(
+                {"mtime": m, "focus": FOCUS["sid"], "seq": FOCUS["seq"]}).encode(),
+                "application/json")
+
+        if p == "/api/focus":
+            sid = q.get("sid", [""])[0]
+            cwd = q.get("cwd", [""])[0]
+            if sid:
+                FOCUS["sid"] = sid; FOCUS["seq"] += 1
+                if cwd:
+                    CWD[sid] = cwd
+                    add_root(cwd)
+            alive = (time.time() - SEEN["at"]) < TAB_ALIVE_SECS
+            return self.send(json.dumps({"ok": True, "tab": alive}).encode(),
+                             "application/json")
+
+        if p == "/raw":
+            f = safe(q.get("p", [""])[0])
+            if not f or not f.is_file(): return self.send(b"not found", "text/plain", 404)
+            ctype = mimetypes.guess_type(f.name)[0] or "application/octet-stream"
+            return self.send(f.read_bytes(), ctype)
+
+        parts = [x for x in p.split("/") if x]
+        if len(parts) >= 2 and parts[0] == "s":
+            sid = parts[1]
+            if len(parts) == 2:
+                d = SESSIONS/sid
+                notes = d/"NOTES.md"
+                body = render_md(notes) if notes.exists() else f"<h1>{html.escape(title_of(sid))}</h1>"
+                body += f'<div class=meta>{html.escape(str(d))}</div>'
+                return self.send(page(title_of(sid), sidebar_for(sid), body, str(d)))
+            if parts[2] == "view":
+                f = safe(q.get("p", [""])[0])
+                if not f or not f.is_file(): return self.send(b"forbidden or missing", "text/plain", 404)
+                ext = f.suffix.lower()
+                raw = f"/raw?p={urllib.parse.quote(str(f))}"
+                if ext in (".md", ".markdown"):
+                    body = render_md(f)
+                elif ext in IMAGE_EXT and not q.get("src"):
+                    # An image file opened from the sidebar should BE the image.
+                    # Falling through to the source path rendered SVG as
+                    # highlighted XML, which is never what was wanted.
+                    body = (f"<h1>{html.escape(f.name)}</h1>"
+                            f'<p><img src="{raw}" alt="{html.escape(f.name)}"></p>')
+                    if ext == ".svg":
+                        body += f'<p><a href="?p={urllib.parse.quote(str(f))}&amp;src=1">view source</a></p>'
+                elif ext == ".pdf":
+                    body = (f"<h1>{html.escape(f.name)}</h1>"
+                            f'<embed src="{raw}" type="application/pdf" '
+                            'style="width:100%;height:80vh;border:1px solid var(--edge);'
+                            'border-radius:8px">')
+                else:
+                    body = f"<h1>{html.escape(f.name)}</h1>" + render_src(f)
+                body += f'<div class=meta>{html.escape(str(f))}</div>'
+                return self.send(page(f.name, sidebar_for(sid, str(f)), body, str(f)))
+
+        self.send(b"not found", "text/plain", 404)
+
+class S(socketserver.ThreadingTCPServer):
+    allow_reuse_address = True; daemon_threads = True
+
+def running(port: int) -> bool:
+    with socket.socket() as s:
+        return s.connect_ex(("127.0.0.1", port)) == 0
+
+if __name__ == "__main__":
+    ap = argparse.ArgumentParser(); ap.add_argument("--port", type=int, default=PORT)
+    ap.add_argument("--foreground", action="store_true"); a = ap.parse_args()
+    if running(a.port): print(f"already running on {a.port}"); raise SystemExit(0)
+    print(f"md-server on http://127.0.0.1:{a.port}")
+    S(("127.0.0.1", a.port), H).serve_forever()
