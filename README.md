@@ -13,8 +13,14 @@ Nothing is published, nothing leaves the machine. The server binds `127.0.0.1`.
 git clone https://github.com/patilvinay/agentlabs-ideas-skill && cd agentlabs-ideas-skill && ./install.sh
 ```
 
-Then restart your agent so it picks up the Stop hook. That is the whole
-install — the browser server starts itself the first time you press the key.
+Then restart your agent so it picks up the Stop hook, and **run it**:
+
+```bash
+tmux            # then press  prefix w
+```
+
+That is the whole install — the browser server starts itself the first time you
+press the key.
 
 Flags: `--no-sudo` (report missing packages instead of installing them),
 `--no-skills`.
@@ -106,6 +112,12 @@ the tab still updates, it just does not come to the front.
 ```
 
 Hooks are matched by path, so anything you added yourself is left alone.
+
+## Companion
+
+[agentlabs-voice](https://github.com/patilvinay/agentlabs-voice) — speech in and
+out for the same agents, from the same tmux. Independent; installing both is
+supported and they share one `lib/agent.sh`.
 
 ## Licence
 
