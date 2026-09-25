@@ -8,16 +8,22 @@
 # launched when no tab is polling — so pressing the key repeatedly, or from
 # different sessions, reuses the same tab.
 #
-# Raising that tab to the front needs a window manager tool; if wmctrl or
-# xdotool is installed it is used, otherwise the tab updates in place and you
-# switch to it yourself (install with: sudo apt install wmctrl).
+# Never changes workspace. If the md-server window is on the workspace you are
+# on, it is raised there; otherwise a new browser window opens here (the old
+# tab elsewhere just follows along). Finding the window needs wmctrl; without
+# it a new window opens every time.
 set -uo pipefail
 port="${MD_WEB_PORT:-7677}"
 srv="$HOME/.local/bin/md-server"
 log="${XDG_RUNTIME_DIR:-/tmp}/md-server.log"
 
-sid=$(basename "$(session-dir "${1:-${TMUX_PANE:-}}" 2>/dev/null)") || {
-  echo "md-web: no session for this pane" >&2; exit 1; }
+# Resolve first, THEN test. `basename ""` succeeds and prints nothing, so the
+# old one-liner form let a failed session-dir through as an empty sid and opened
+# /s/ -- a wrong page rather than an error.
+dir=$(session-dir "${1:-${TMUX_PANE:-}}" 2>/dev/null)
+sid=$(basename "$dir")
+[ -n "$dir" ] && [ -n "$sid" ] && [ "$sid" != "." ] || {
+  echo "md-web: no session for this pane (${1:-${TMUX_PANE:-no pane}})" >&2; exit 1; }
 
 up() { (exec 3<>/dev/tcp/127.0.0.1/"$port") 2>/dev/null; }
 
@@ -36,15 +42,26 @@ tab=$(curl -s --max-time 2 --get \
       "http://127.0.0.1:$port/api/focus" \
       | grep -o '"tab": *true' || true)
 
-if [ -n "$tab" ]; then
-  # A tab is polling: it will navigate on its own. Just try to raise it.
-  if command -v wmctrl >/dev/null;  then wmctrl -a 'md-server' 2>/dev/null || true
-  elif command -v xdotool >/dev/null; then
-    xdotool search --name 'md-server' windowactivate 2>/dev/null | tail -1 >/dev/null || true
-  fi
-  tmux display-message "browser tab → $(session-title "$sid" 2>/dev/null || echo "$sid")" 2>/dev/null || true
+# The md-server window on the current workspace (or on all of them), if any.
+# wmctrl -a would jump to whichever workspace the window is on, so never use it
+# by title; activate by id, and only a window that is already here.
+here_window() {
+  command -v wmctrl >/dev/null || return 1
+  local cur; cur=$(wmctrl -d 2>/dev/null | awk '$2=="*"{print $1; exit}')
+  [ -n "$cur" ] || return 1
+  wmctrl -l 2>/dev/null | awk -v d="$cur" '($2==d || $2==-1) && /md-server/ {print $1; exit}' | grep .
+}
+
+title=$(session-title "$sid" 2>/dev/null || echo "$sid")
+if [ -n "$tab" ] && win=$(here_window); then
+  # A tab on this workspace is polling: it navigates on its own. Raise it.
+  wmctrl -i -a "$win" 2>/dev/null || true
+  tmux display-message "browser tab → $title" 2>/dev/null || true
 else
+  # No tab, or only on another workspace: open a new window right here. The
+  # default browser (chrome-link-here.desktop) opens links with --new-window,
+  # which lands on the current workspace.
   command -v xdg-open >/dev/null && xdg-open "$url" >/dev/null 2>&1 &
-  tmux display-message "opened browser → $(session-title "$sid" 2>/dev/null || echo "$sid")" 2>/dev/null || true
+  tmux display-message "opened browser → $title" 2>/dev/null || true
 fi
 printf '%s\n' "$url"
