@@ -30,6 +30,7 @@ class SiteTests(unittest.TestCase):
         (mock / "img").mkdir(parents=True)
         (mock / "index.html").write_text('<link rel="stylesheet" href="style.css"><a href="next.html">next</a>')
         (mock / "next.html").write_text("<h1>next</h1>")
+        (mock / "README.md").write_text("# Mockups")
         (mock / "style.css").write_text("body{color:red}")
         (mock / "app.js").write_text("console.log(1)")
         (mock / "img/logo.svg").write_text('<svg xmlns="http://www.w3.org/2000/svg"/>')
@@ -129,6 +130,32 @@ class SiteTests(unittest.TestCase):
         _, _, body = self.get(f"/s/{SID}")
         for name in ("index.html", "next.html"):
             self.assertIn(f">{name}<", body)
+
+    def sidebar_folder(self, body, folder):
+        start = body.index(f'data-folder="{folder}"')
+        return body[body.rindex("<details", 0, start):]
+
+    def test_readme_and_index_first_then_files_then_folders(self):
+        _, _, body = self.get(f"/s/{SID}")
+        tree = self.sidebar_folder(body, "00-scratch/92-mockups")
+        order = [tree.index(f">{n}<") for n in ("README.md", "index.html", "app.js", "next.html", "style.css")]
+        self.assertEqual(order, sorted(order))
+        self.assertLess(order[-1], tree.index('data-folder="00-scratch/92-mockups/img"'))
+
+    def test_asset_only_folder_starts_collapsed(self):
+        _, _, body = self.get(f"/s/{SID}")
+        self.assertIn('<details data-folder="00-scratch/92-mockups/img">', body)
+        self.assertIn('<details open data-folder="00-scratch/92-mockups">', body)
+
+    def test_asset_folder_opens_when_it_holds_the_open_file(self):
+        _, _, body = self.get(f"/s/{SID}/view?p={self.mock / 'img/logo.svg'}")
+        self.assertIn('<details open data-folder="00-scratch/92-mockups/img">', body)
+
+    def test_page_assets_beside_an_index_are_dimmed(self):
+        _, _, body = self.get(f"/s/{SID}")
+        self.assertRegex(body, r'<a class="asset" href="[^"]*app\.js">')
+        self.assertRegex(body, r'<a class="asset" href="[^"]*style\.css">')
+        self.assertRegex(body, r'<a class="" href="[^"]*next\.html">')
 
     def test_sandboxed_page_cannot_use_the_api_or_raw(self):
         f = self.mock / "style.css"

@@ -125,6 +125,7 @@ aside a{display:block;color:var(--fg);text-decoration:none;padding:4px 8px;borde
 font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 aside a:hover{background:#232735}
 aside a.on{background:#2a3350;color:#fff}
+aside a.asset{color:var(--dim)}
 aside summary{cursor:pointer;color:var(--accent);padding:5px 0;font-size:13px}
 aside .folder{margin-left:10px;border-left:1px solid var(--edge);padding-left:5px}
 main{padding:34px 44px;max-width:1100px}
@@ -355,8 +356,9 @@ setInterval(async()=>{{try{{
 <div class=wrap><aside>{sidebar}</aside><main{' class=wide' if wide else ''}>{body}</main></div>{SIDEBAR_STATE}{poll}
 {MERMAID if 'class="mermaid"' in body else ''}""".encode()
 
-def link(href: str, label: str, on: bool = False) -> str:
-    return f'<a class="{"on" if on else ""}" href="{html.escape(href)}">{html.escape(label)}</a>'
+def link(href: str, label: str, on: bool = False, cls: str = "") -> str:
+    classes = " ".join(c for c in ("on" if on else "", cls) if c)
+    return f'<a class="{classes}" href="{html.escape(href)}">{html.escape(label)}</a>'
 
 def list_md(root: Path, depth: int = 2, limit: int = 30) -> list[Path]:
     """Markdown under a directory, newest first, skipping the usual noise."""
@@ -425,21 +427,58 @@ def session_entries(root: Path, _budget: list | None = None):
             yield entry, False, info
 
 
+# Page assets rather than documents: a folder holding only these (a mockup's
+# img/) starts collapsed, and beside an index.html they are shown dimmed.
+ASSET_EXT = IMAGE_EXT | {".js", ".mjs", ".css", ".map", ".woff", ".woff2", ".ttf", ".otf"}
+PINNED = ("readme.md", "index.html", "index.htm", "index.md")
+
+
+def tree_order(entries):
+    """README/index first, then the other files, then subfolders; each by name."""
+    def key(item):
+        path, directory = item
+        name = path.name.lower()
+        if directory:
+            return (2, 0, name)
+        return (0, PINNED.index(name), name) if name in PINNED else (1, 0, name)
+    return sorted(entries, key=key)
+
+
 def session_tree(root: Path, sid: str, cur: str = "") -> str:
     children = {}
     for path, directory, _ in session_entries(root):
         children.setdefault(path.parent, []).append((path, directory))
     stages = {"00-scratch": "Draft", "10-review": "Review", "20-approved": "Approved"}
 
+    def files_under(folder):
+        for path, directory in children.get(folder, []):
+            if directory:
+                yield from files_under(path)
+            else:
+                yield path
+
+    def assets_only(folder):
+        files = list(files_under(folder))
+        return bool(files) and all(f.suffix.lower() in ASSET_EXT for f in files)
+
     def render(parent):
         out = []
-        for path, directory in children.get(parent, []):
+        entries = tree_order(children.get(parent, []))
+        has_index = any(p.name.lower() in ("index.html", "index.htm") for p, d in entries if not d)
+        for path, directory in entries:
             if directory:
                 label = stages.get(path.name, path.name) if parent == root else path.name
-                out.append('<details open data-folder="' + html.escape(str(path.relative_to(root)), quote=True) + '"><summary>' + html.escape(label) + '</summary><div class="folder">'
+                # Collapsed only by default: the remembered state still wins,
+                # and the folder holding the open file always opens.
+                opened = not assets_only(path) or cur.startswith(str(path) + "/")
+                out.append('<details' + (' open' if opened else '') + ' data-folder="'
+                           + html.escape(str(path.relative_to(root)), quote=True) + '"><summary>'
+                           + html.escape(label) + '</summary><div class="folder">'
                            + render(path) + '</div></details>')
             else:
-                out.append(link(f"/s/{sid}/view?p={urllib.parse.quote(str(path))}", path.name, str(path) == cur))
+                dim = has_index and path.suffix.lower() in (".js", ".mjs", ".css", ".map")
+                out.append(link(f"/s/{sid}/view?p={urllib.parse.quote(str(path))}", path.name,
+                                str(path) == cur, "asset" if dim else ""))
         return "".join(out)
 
     return render(root) or '<div class="sub">No session files yet</div>'
