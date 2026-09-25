@@ -128,6 +128,18 @@ aside a.on{background:#2a3350;color:#fff}
 aside summary{cursor:pointer;color:var(--accent);padding:5px 0;font-size:13px}
 aside .folder{margin-left:10px;border-left:1px solid var(--edge);padding-left:5px}
 main{padding:34px 44px;max-width:1100px}
+/* An HTML mockup: whole content width, whole viewport height. */
+main.wide{max-width:none;height:100vh;padding:10px 14px;display:flex;flex-direction:column;gap:8px}
+.bar{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--dim);flex-wrap:wrap}
+.bar b{color:var(--fg);margin-right:8px;font-weight:600}
+.bar button,.bar a{background:#232735;color:var(--fg);border:1px solid var(--edge);border-radius:6px;
+padding:3px 10px;font:inherit;cursor:pointer;text-decoration:none}
+.bar button.on{background:#2a3350;border-color:var(--accent)}
+.bar .gap{flex:1}
+.frame{flex:1;min-height:0;overflow:auto;border:1px solid var(--edge);border-radius:8px;background:#fff}
+.frame iframe{display:block;border:0;width:100%;height:100%;background:#fff;margin:0 auto}
+.wrap.nosb{grid-template-columns:0 1fr}
+.wrap.nosb aside{display:none}
 main img,main svg{max-width:100%;height:auto;border-radius:8px;background:#fff0}
 h1,h2,h3{line-height:1.25}
 main>h1:first-child{margin-top:0}
@@ -215,6 +227,31 @@ def from_sandbox(headers) -> bool:
             or headers.get("Sec-Fetch-Site") in ("cross-site", "same-site"))
 
 
+# Width presets and the sidebar toggle for a framed mockup. Remembered per
+# browser (localStorage), wrapped in try: storage can be unavailable.
+FRAME_CONTROLS = r"""<script>
+(() => {
+ const frame = document.querySelector('.frame iframe'), wrap = document.querySelector('.wrap');
+ const get = k => { try { return localStorage.getItem('md-frame:' + k); } catch (_) { return null; } };
+ const put = (k, v) => { try { localStorage.setItem('md-frame:' + k, v); } catch (_) {} };
+ function width(w) {
+   frame.style.width = w === 'fit' ? '100%' : w + 'px';
+   document.querySelectorAll('.bar [data-w]').forEach(b => b.classList.toggle('on', b.dataset.w === w));
+   put('width', w);
+ }
+ function sidebar(hidden) {
+   wrap.classList.toggle('nosb', hidden);
+   document.getElementById('sb').classList.toggle('on', hidden);
+   put('nosb', hidden ? '1' : '0');
+ }
+ document.querySelectorAll('.bar [data-w]').forEach(b => b.onclick = () => width(b.dataset.w));
+ document.getElementById('sb').onclick = () => sidebar(!wrap.classList.contains('nosb'));
+ width(get('width') || 'fit');
+ sidebar(get('nosb') === '1');
+})();
+</script>"""
+
+
 def session_dir(sid: str) -> Path:
     for root in SESSION_ROOTS:
         candidate = root/sid
@@ -299,7 +336,8 @@ SIDEBAR_STATE = r"""<script>
 </script>"""
 
 
-def page(title: str, sidebar: str, body: str, watch: str = "", tree: str = "") -> bytes:
+def page(title: str, sidebar: str, body: str, watch: str = "", tree: str = "",
+         wide: bool = False) -> bytes:
     # The tick does three jobs: tells the server a tab is alive, reloads this
     # page when the file changes, and follows the key to another session.
     poll = f"""<script>
@@ -314,7 +352,7 @@ setInterval(async()=>{{try{{
     return f"""<!doctype html><meta charset=utf-8>
 <title>{html.escape(title)} · md-server</title>
 <style>{CSS}{FMT.get_style_defs('.hl')}</style>
-<div class=wrap><aside>{sidebar}</aside><main>{body}</main></div>{SIDEBAR_STATE}{poll}
+<div class=wrap><aside>{sidebar}</aside><main{' class=wide' if wide else ''}>{body}</main></div>{SIDEBAR_STATE}{poll}
 {MERMAID if 'class="mermaid"' in body else ''}""".encode()
 
 def link(href: str, label: str, on: bool = False) -> str:
@@ -539,6 +577,7 @@ class H(http.server.BaseHTTPRequestHandler):
                 if not f or not f.is_file(): return self.send(b"forbidden or missing", "text/plain", 404)
                 ext = f.suffix.lower()
                 raw = f"/raw?p={urllib.parse.quote(str(f))}"
+                wide = False
                 site = site_url(sid, f) if ext in HTML_EXT else None
                 source = q.get("src") or q.get("view", [""])[0] == "source"
                 if ext in (".md", ".markdown"):
@@ -547,12 +586,16 @@ class H(http.server.BaseHTTPRequestHandler):
                     # A mockup: run it, framed and sandboxed. Links inside it
                     # navigate the frame; "new tab" gives it the whole window.
                     here = urllib.parse.quote(str(f))
-                    body = (f"<h1>{html.escape(f.name)}</h1>"
-                            f'<p class=sub><a href="{site}" target="_blank" rel="noopener">open in new tab</a>'
-                            f' · <a href="?p={here}&amp;src=1">view source</a></p>'
-                            f'<iframe src="{site}" sandbox="allow-scripts allow-forms allow-popups allow-modals" '
-                            'style="width:100%;height:80vh;border:1px solid var(--edge);'
-                            'border-radius:8px;background:#fff"></iframe>')
+                    body = (f'<div class=bar><b title="{html.escape(str(f))}">{html.escape(f.name)}</b>'
+                            '<button data-w="fit">Fit</button><button data-w="1440">1440</button>'
+                            '<button data-w="1920">1920</button><span class=gap></span>'
+                            '<button id=sb title="Hide or show the sidebar">Sidebar</button>'
+                            f'<a href="{site}" target="_blank" rel="noopener">New tab</a>'
+                            f'<a href="?p={here}&amp;src=1">Source</a></div>'
+                            f'<div class=frame><iframe src="{site}" '
+                            'sandbox="allow-scripts allow-forms allow-popups allow-modals"></iframe></div>'
+                            + FRAME_CONTROLS)
+                    wide = True
                 elif ext in IMAGE_EXT and not q.get("src"):
                     # An image file opened from the sidebar should BE the image.
                     # Falling through to the source path rendered SVG as
@@ -568,8 +611,10 @@ class H(http.server.BaseHTTPRequestHandler):
                             'border-radius:8px">')
                 else:
                     body = f"<h1>{html.escape(f.name)}</h1>" + render_src(f)
-                body += f'<div class=meta>{html.escape(str(f))}</div>'
-                return self.send(page(f.name, sidebar_for(sid, str(f)), body, str(f), str(session_dir(sid))))
+                if not wide:
+                    body += f'<div class=meta>{html.escape(str(f))}</div>'
+                return self.send(page(f.name, sidebar_for(sid, str(f)), body, str(f),
+                                      str(session_dir(sid)), wide=wide))
 
         self.send(b"not found", "text/plain", 404)
 

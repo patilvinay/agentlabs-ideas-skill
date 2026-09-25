@@ -34,6 +34,7 @@ class SiteTests(unittest.TestCase):
         (mock / "app.js").write_text("console.log(1)")
         (mock / "img/logo.svg").write_text('<svg xmlns="http://www.w3.org/2000/svg"/>')
         (cls.session / ".secret").write_text("hidden")
+        (cls.session / "00-scratch/notes.md").write_text("# Notes")
         # Outside every session: must never be reachable.
         (home / "private.txt").write_text("private")
         (mock / "escape.html").symlink_to(home / "private.txt")
@@ -110,6 +111,24 @@ class SiteTests(unittest.TestCase):
         self.assertEqual(code, 200)
         self.assertNotIn("<iframe", body)
         self.assertIn("next.html", body)
+
+    def test_mockup_view_is_full_width_with_controls(self):
+        code, _, body = self.get(f"/s/{SID}/view?p={self.mock / 'index.html'}")
+        self.assertEqual(code, 200)
+        self.assertIn("<main class=wide>", body)
+        for control in ('data-w="fit"', 'data-w="1440"', 'data-w="1920"', "id=sb", "New tab", "Source"):
+            self.assertIn(control, body)
+
+    def test_markdown_keeps_its_reading_width(self):
+        code, _, body = self.get(f"/s/{SID}/view?p={self.session / '00-scratch/notes.md'}")
+        self.assertEqual(code, 200)
+        self.assertIn("<main>", body)
+        self.assertNotIn("class=wide", body)
+
+    def test_every_html_file_is_in_the_sidebar(self):
+        _, _, body = self.get(f"/s/{SID}")
+        for name in ("index.html", "next.html"):
+            self.assertIn(f">{name}<", body)
 
     def test_sandboxed_page_cannot_use_the_api_or_raw(self):
         f = self.mock / "style.css"
