@@ -22,6 +22,9 @@ Routes
   /s/<sid>                one session: stages, then cwd markdown, then repo
   /s/<sid>/view?p=PATH    a rendered file
   /raw?p=PATH             raw bytes, for <img> (SVG included)
+  /s/<sid>/site/REL       a session file served as a web page, so an HTML
+                          mockup runs with its relative CSS/JS/images/links.
+                          /s/<sid>/view?p=X.html frames it; &src=1 = source
   /api/mtime?p=PATH       polled by the page so it refreshes when a file changes
 
 Safety: binds 127.0.0.1 only, and every path is resolved and checked against
@@ -33,10 +36,12 @@ from pathlib import Path
 
 HOME = Path.home()
 # Always readable: this project's own directories.
-SESSIONS = Path(os.environ.get("AGENTLABS_SESSIONS", HOME/".claude/scratch"))
+_sessions_override = os.environ.get("AGENTLABS_SESSIONS")
+SESSION_ROOTS = ([Path(_sessions_override)] if _sessions_override else
+                 [HOME/".codex/scratch", HOME/".claude/scratch"])
 VIEWDIR  = Path(os.environ.get("AGENTLABS_VIEW", HOME/".claude/wave"))
 # Always readable: this project's own directories.
-ROOTS = [SESSIONS, VIEWDIR, HOME/".claude/demo"]
+ROOTS = SESSION_ROOTS + [VIEWDIR, HOME/".claude/demo"]
 # Plus wherever the panes actually are. Hardcoding ~/workspace assumed one
 # person's layout; a pane in ~/code or /srv/app would have got 404s for its own
 # files. md-web sends its cwd, and that directory (and the git repo containing
@@ -120,6 +125,8 @@ aside a{display:block;color:var(--fg);text-decoration:none;padding:4px 8px;borde
 font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 aside a:hover{background:#232735}
 aside a.on{background:#2a3350;color:#fff}
+aside summary{cursor:pointer;color:var(--accent);padding:5px 0;font-size:13px}
+aside .folder{margin-left:10px;border-left:1px solid var(--edge);padding-left:5px}
 main{padding:34px 44px;max-width:1100px}
 main img,main svg{max-width:100%;height:auto;border-radius:8px;background:#fff0}
 h1,h2,h3{line-height:1.25}
@@ -156,17 +163,81 @@ def safe(p: str) -> Path | None:
     return None
 
 def sessions() -> list[tuple[str, str]]:
-    root = SESSIONS
-    out = []
-    if root.is_dir():
-        for d in sorted(root.iterdir(), key=lambda x: -x.stat().st_mtime):
-            if d.is_dir(): out.append((d.name, title_of(d.name)))
-    return out
+    found = {}
+    for root in SESSION_ROOTS:
+        if root.is_dir():
+            for d in sorted(root.iterdir(), key=lambda x: -x.stat().st_mtime):
+                if d.is_dir() and d.name not in found:
+                    found[d.name] = (d.stat().st_mtime, title_of(d.name))
+    return [(sid, title) for sid, (_, title) in
+            sorted(found.items(), key=lambda item: -item[1][0])]
+
+# --- HTML mockups -------------------------------------------------------------
+# A session's .html files are served as pages under /s/<sid>/site/<relative
+# path>, so relative CSS, JS, images and links between pages just work. They
+# are untrusted: every response carries a CSP sandbox WITHOUT allow-same-origin,
+# which gives the page an opaque origin. It can run its own scripts but cannot
+# read md-server's responses, and the API refuses requests it makes (below).
+HTML_EXT = {".html", ".htm"}
+SITE_TYPES = {".js": "text/javascript", ".mjs": "text/javascript", ".css": "text/css",
+              ".json": "application/json", ".svg": "image/svg+xml", ".woff": "font/woff",
+              ".woff2": "font/woff2", ".ttf": "font/ttf", ".otf": "font/otf",
+              ".html": "text/html; charset=utf-8", ".htm": "text/html; charset=utf-8"}
+SITE_CSP = "sandbox allow-scripts allow-forms allow-popups allow-modals"
+
+
+def site_file(sid: str, rel: str) -> Path | None:
+    """A file inside this session's folder, or None. Resolving first means '..'
+    and symlinks are judged by where they actually land, never by spelling."""
+    try:
+        root = session_dir(sid).resolve()
+        target = (root / urllib.parse.unquote(rel)).resolve()
+        target.relative_to(root)
+    except (OSError, ValueError, RuntimeError):
+        return None
+    if any(part.startswith(".") for part in target.relative_to(root).parts):
+        return None
+    return target if target.is_file() else None
+
+
+def site_url(sid: str, f: Path) -> str | None:
+    """/s/<sid>/site/... for a file in this session, else None."""
+    try:
+        rel = f.resolve().relative_to(session_dir(sid).resolve())
+    except (OSError, ValueError):
+        return None
+    return f"/s/{urllib.parse.quote(sid)}/site/" + urllib.parse.quote(str(rel))
+
+
+def from_sandbox(headers) -> bool:
+    """A request made by a sandboxed mockup (opaque origin) or another site."""
+    return (headers.get("Origin") == "null"
+            or headers.get("Sec-Fetch-Site") in ("cross-site", "same-site"))
+
+
+def session_dir(sid: str) -> Path:
+    for root in SESSION_ROOTS:
+        candidate = root/sid
+        if candidate.is_dir():
+            return candidate
+    return SESSION_ROOTS[0]/sid
 
 def title_of(sid: str) -> str:
     for f in (HOME/".claude/projects").glob(f"*/{sid}/custom-title.json"):
         try: return json.load(open(f)).get("customTitle") or sid[:8]
         except Exception: pass
+    index = HOME/".codex/session_index.jsonl"
+    title = ""
+    if index.is_file():
+        try:
+            for line in index.read_text(encoding="utf-8").splitlines():
+                record = json.loads(line)
+                if record.get("id") == sid:
+                    title = record.get("thread_name") or title
+        except Exception:
+            pass
+    if title:
+        return title
     return sid[:8]
 
 def render_md(path: Path) -> str:
@@ -194,21 +265,56 @@ mermaid.initialize({startOnLoad:true,theme:'dark',
 </script>"""
 
 
-def page(title: str, sidebar: str, body: str, watch: str = "") -> bytes:
+SIDEBAR_STATE = r"""<script>
+(() => {
+ const aside = document.querySelector('aside');
+ const session = location.pathname.match(/^\/s\/([^/]+)/);
+ if (!aside || !session) return;
+ const key = 'md-sidebar:v1:' + session[1];
+ const folders = [...aside.querySelectorAll('details[data-folder]')];
+ let saved;
+ try { saved = JSON.parse(sessionStorage.getItem(key)); } catch (_) {}
+ if (saved && typeof saved === 'object') {
+   for (const folder of folders) {
+     const open = saved.folds && saved.folds[folder.dataset.folder];
+     if (typeof open === 'boolean') folder.open = open;
+   }
+   if (Number.isFinite(saved.scrollTop)) aside.scrollTop = Math.max(0, saved.scrollTop);
+ }
+ function save() {
+   const state = {
+     folds: Object.fromEntries(folders.map(f => [f.dataset.folder, f.open])),
+     scrollTop: aside.scrollTop
+   };
+   try { sessionStorage.setItem(key, JSON.stringify(state)); } catch (_) {}
+ }
+ aside.addEventListener('toggle', save, true);
+ aside.addEventListener('scroll', save, {passive: true});
+ // Save before all document links, including links in the Markdown body.
+ document.addEventListener('click', event => {
+   if (event.target.closest('a[href]')) save();
+ }, true);
+ window.addEventListener('pagehide', save);
+})();
+</script>"""
+
+
+def page(title: str, sidebar: str, body: str, watch: str = "", tree: str = "") -> bytes:
     # The tick does three jobs: tells the server a tab is alive, reloads this
     # page when the file changes, and follows the key to another session.
     poll = f"""<script>
-let last=null,seq=null;
+let last=null,lastTree=null,seq=null;
 setInterval(async()=>{{try{{
- const r=await fetch('/api/tick?p={urllib.parse.quote(watch)}');const j=await r.json();
+ const r=await fetch('/api/tick?p={urllib.parse.quote(watch)}&tree={urllib.parse.quote(tree)}');const j=await r.json();
  if(seq!==null&&j.seq!==seq&&j.focus){{location.href='/s/'+j.focus;return;}}
  seq=j.seq;
- if(last!==null&&j.mtime!==last)location.reload();last=j.mtime;
+ if((last!==null&&j.mtime!==last)||(lastTree!==null&&j.tree!==lastTree))location.reload();
+ last=j.mtime;lastTree=j.tree;
 }}catch(e){{}}}},1200);</script>"""
     return f"""<!doctype html><meta charset=utf-8>
 <title>{html.escape(title)} · md-server</title>
 <style>{CSS}{FMT.get_style_defs('.hl')}</style>
-<div class=wrap><aside>{sidebar}</aside><main>{body}</main></div>{poll}
+<div class=wrap><aside>{sidebar}</aside><main>{body}</main></div>{SIDEBAR_STATE}{poll}
 {MERMAID if 'class="mermaid"' in body else ''}""".encode()
 
 def link(href: str, label: str, on: bool = False) -> str:
@@ -247,17 +353,76 @@ def repo_files(start: Path, limit: int = 200) -> tuple[str, list[Path]]:
         return "", []
 
 
+SESSION_SKIP = {"node_modules", "vendor", "__pycache__", "dist", "build", "site-packages"}
+SESSION_LIMIT = 2000
+
+
+def session_entries(root: Path, _budget: list | None = None):
+    """Visible session entries, without following links outside the tree or cycles.
+
+    A session folder can hold cloned repositories and worktrees. Their contents
+    are not session documents, and walking them (vendor/, node_modules/) made
+    the page time out, so a git checkout is listed but never descended into.
+    """
+    budget = [SESSION_LIMIT] if _budget is None else _budget
+    try:
+        entries = sorted(root.iterdir(), key=lambda p: p.name)
+    except OSError:
+        return
+    for entry in entries:
+        if budget[0] <= 0:
+            return
+        if entry.name.startswith(".") or entry.is_symlink() or entry.name in SESSION_SKIP:
+            continue
+        try:
+            info = entry.stat()
+        except OSError:
+            continue
+        budget[0] -= 1
+        if entry.is_dir():
+            yield entry, True, info
+            if not (entry / ".git").exists():
+                yield from session_entries(entry, budget)
+        elif entry.is_file():
+            yield entry, False, info
+
+
+def session_tree(root: Path, sid: str, cur: str = "") -> str:
+    children = {}
+    for path, directory, _ in session_entries(root):
+        children.setdefault(path.parent, []).append((path, directory))
+    stages = {"00-scratch": "Draft", "10-review": "Review", "20-approved": "Approved"}
+
+    def render(parent):
+        out = []
+        for path, directory in children.get(parent, []):
+            if directory:
+                label = stages.get(path.name, path.name) if parent == root else path.name
+                out.append('<details open data-folder="' + html.escape(str(path.relative_to(root)), quote=True) + '"><summary>' + html.escape(label) + '</summary><div class="folder">'
+                           + render(path) + '</div></details>')
+            else:
+                out.append(link(f"/s/{sid}/view?p={urllib.parse.quote(str(path))}", path.name, str(path) == cur))
+        return "".join(out)
+
+    return render(root) or '<div class="sub">No session files yet</div>'
+
+
+def tree_revision(root: Path) -> str:
+    """Detect nested additions, removals, renames and edits without reading bodies."""
+    import hashlib
+    digest = hashlib.sha256()
+    for path, directory, info in session_entries(root):
+        record = (str(path.relative_to(root)), directory, info.st_mtime_ns, info.st_size)
+        digest.update(json.dumps(record).encode())
+    return digest.hexdigest()
+
+
 def sidebar_for(sid: str, cur: str = "") -> str:
-    d = SESSIONS/sid
+    d = session_dir(sid)
     s = [f"<h1>{html.escape(title_of(sid))}</h1><div class=sub>{sid[:8]}</div>"]
     s.append(link(f"/s/{sid}", "session overview", cur == ""))
-    for sub, name, cls in (("00-scratch","Draft","s0"),("10-review","Review","s1"),("20-approved","Approved","s2")):
-        s.append(f'<h2><span class="stage {cls}">{name}</span></h2>')
-        files = sorted((d/sub).glob("*")) if (d/sub).is_dir() else []
-        if not files: s.append('<div class=sub style="padding-left:8px">empty</div>')
-        for f in files:
-            if f.is_file():
-                s.append(link(f"/s/{sid}/view?p={urllib.parse.quote(str(f))}", f.name, str(f) == cur))
+    s.append("<h2>Session files</h2>")
+    s.append(session_tree(d, sid, cur))
     s.append("<h2>Panel</h2>")
     for f in (VIEWDIR/"claude-view.md", VIEWDIR/"index.md"):
         if f.exists(): s.append(link(f"/s/{sid}/view?p={urllib.parse.quote(str(f))}", f.name, str(f) == cur))
@@ -309,12 +474,22 @@ class H(http.server.BaseHTTPRequestHandler):
             rows = "".join(f'<li>{link(f"/s/{sid}", t)}</li>' for sid, t in sessions())
             return self.send(page("sessions", "<h1>sessions</h1>", f"<h1>Sessions</h1><ul>{rows}</ul>"))
 
+        # A mockup must not drive the server (focus is a GET with side effects)
+        # or read files through /raw. Its own site/ requests stay allowed.
+        if (p.startswith("/api/") or p == "/raw") and from_sandbox(self.headers):
+            return self.send(b"forbidden", "text/plain", 403)
+
         if p in ("/api/mtime", "/api/tick"):
             SEEN["at"] = time.time()          # a tab is open and polling
             f = safe(q.get("p", [""])[0])
-            m = f.stat().st_mtime if f and f.exists() else 0
+            try:
+                m = f.stat().st_mtime_ns if f else 0
+            except OSError:
+                m = 0
+            tree = safe(q.get("tree", [""])[0]) if q.get("tree", [""])[0] else None
             return self.send(json.dumps(
-                {"mtime": m, "focus": FOCUS["sid"], "seq": FOCUS["seq"]}).encode(),
+                {"mtime": str(m), "tree": tree_revision(tree) if tree and tree.is_dir() else "",
+                 "focus": FOCUS["sid"], "seq": FOCUS["seq"]}).encode(),
                 "application/json")
 
         if p == "/api/focus":
@@ -339,18 +514,45 @@ class H(http.server.BaseHTTPRequestHandler):
         if len(parts) >= 2 and parts[0] == "s":
             sid = parts[1]
             if len(parts) == 2:
-                d = SESSIONS/sid
+                d = session_dir(sid)
                 notes = d/"NOTES.md"
                 body = render_md(notes) if notes.exists() else f"<h1>{html.escape(title_of(sid))}</h1>"
                 body += f'<div class=meta>{html.escape(str(d))}</div>'
-                return self.send(page(title_of(sid), sidebar_for(sid), body, str(d)))
+                return self.send(page(title_of(sid), sidebar_for(sid), body, str(d), str(d)))
+            if parts[2] == "site":
+                f = site_file(sid, "/".join(parts[3:]))
+                if not f:
+                    return self.send(b"not found", "text/plain", 404)
+                ctype = (SITE_TYPES.get(f.suffix.lower())
+                         or mimetypes.guess_type(f.name)[0] or "application/octet-stream")
+                data = f.read_bytes()
+                self.send_response(200)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Content-Security-Policy", SITE_CSP)
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header("Cache-Control", "no-cache")
+                self.end_headers()
+                return self.wfile.write(data)
             if parts[2] == "view":
                 f = safe(q.get("p", [""])[0])
                 if not f or not f.is_file(): return self.send(b"forbidden or missing", "text/plain", 404)
                 ext = f.suffix.lower()
                 raw = f"/raw?p={urllib.parse.quote(str(f))}"
+                site = site_url(sid, f) if ext in HTML_EXT else None
+                source = q.get("src") or q.get("view", [""])[0] == "source"
                 if ext in (".md", ".markdown"):
                     body = render_md(f)
+                elif site and not source:
+                    # A mockup: run it, framed and sandboxed. Links inside it
+                    # navigate the frame; "new tab" gives it the whole window.
+                    here = urllib.parse.quote(str(f))
+                    body = (f"<h1>{html.escape(f.name)}</h1>"
+                            f'<p class=sub><a href="{site}" target="_blank" rel="noopener">open in new tab</a>'
+                            f' · <a href="?p={here}&amp;src=1">view source</a></p>'
+                            f'<iframe src="{site}" sandbox="allow-scripts allow-forms allow-popups allow-modals" '
+                            'style="width:100%;height:80vh;border:1px solid var(--edge);'
+                            'border-radius:8px;background:#fff"></iframe>')
                 elif ext in IMAGE_EXT and not q.get("src"):
                     # An image file opened from the sidebar should BE the image.
                     # Falling through to the source path rendered SVG as
@@ -367,7 +569,7 @@ class H(http.server.BaseHTTPRequestHandler):
                 else:
                     body = f"<h1>{html.escape(f.name)}</h1>" + render_src(f)
                 body += f'<div class=meta>{html.escape(str(f))}</div>'
-                return self.send(page(f.name, sidebar_for(sid, str(f)), body, str(f)))
+                return self.send(page(f.name, sidebar_for(sid, str(f)), body, str(f), str(session_dir(sid))))
 
         self.send(b"not found", "text/plain", 404)
 
