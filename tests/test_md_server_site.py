@@ -36,6 +36,10 @@ class SiteTests(unittest.TestCase):
         (mock / "img/logo.svg").write_text('<svg xmlns="http://www.w3.org/2000/svg"/>')
         (cls.session / ".secret").write_text("hidden")
         (cls.session / "00-scratch/notes.md").write_text("# Notes")
+        clone = cls.session / "code/some-repo"
+        (clone / ".git").mkdir(parents=True)
+        (clone / "src").mkdir()
+        (clone / "src/main.go").write_text("package main")
         # Outside every session: must never be reachable.
         (home / "private.txt").write_text("private")
         (mock / "escape.html").symlink_to(home / "private.txt")
@@ -156,6 +160,21 @@ class SiteTests(unittest.TestCase):
         self.assertRegex(body, r'<a class="asset" href="[^"]*app\.js">')
         self.assertRegex(body, r'<a class="asset" href="[^"]*style\.css">')
         self.assertRegex(body, r'<a class="" href="[^"]*next\.html">')
+
+    def test_stage_folders_show_their_real_names(self):
+        _, _, body = self.get(f"/s/{SID}")
+        self.assertIn("<summary>00-scratch</summary>", body)
+        for label in (">Draft<", ">Review<", ">Approved<"):
+            self.assertNotIn(label, body)
+
+    def test_code_clone_is_listed_but_not_expanded(self):
+        _, _, body = self.get(f"/s/{SID}")
+        self.assertIn('data-folder="code/some-repo"', body)
+        self.assertNotIn("main.go", body)
+
+    def test_scroll_is_restored_only_for_the_same_tree(self):
+        _, _, body = self.get(f"/s/{SID}")
+        self.assertIn("saved.shape === shape", body)
 
     def test_sandboxed_page_cannot_use_the_api_or_raw(self):
         f = self.mock / "style.css"

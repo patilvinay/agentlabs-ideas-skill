@@ -310,6 +310,7 @@ SIDEBAR_STATE = r"""<script>
  if (!aside || !session) return;
  const key = 'md-sidebar:v1:' + session[1];
  const folders = [...aside.querySelectorAll('details[data-folder]')];
+ const shape = folders.map(f => f.dataset.folder).join('\n');
  let saved;
  try { saved = JSON.parse(sessionStorage.getItem(key)); } catch (_) {}
  if (saved && typeof saved === 'object') {
@@ -317,12 +318,16 @@ SIDEBAR_STATE = r"""<script>
      const open = saved.folds && saved.folds[folder.dataset.folder];
      if (typeof open === 'boolean') folder.open = open;
    }
-   if (Number.isFinite(saved.scrollTop)) aside.scrollTop = Math.max(0, saved.scrollTop);
+   // A scroll offset only means something in the same tree: after folders
+   // appear or vanish it can leave the top of the tree out of view.
+   if (Number.isFinite(saved.scrollTop) && saved.shape === shape)
+     aside.scrollTop = Math.max(0, saved.scrollTop);
  }
  function save() {
    const state = {
      folds: Object.fromEntries(folders.map(f => [f.dataset.folder, f.open])),
-     scrollTop: aside.scrollTop
+     scrollTop: aside.scrollTop,
+     shape
    };
    try { sessionStorage.setItem(key, JSON.stringify(state)); } catch (_) {}
  }
@@ -448,8 +453,6 @@ def session_tree(root: Path, sid: str, cur: str = "") -> str:
     children = {}
     for path, directory, _ in session_entries(root):
         children.setdefault(path.parent, []).append((path, directory))
-    stages = {"00-scratch": "Draft", "10-review": "Review", "20-approved": "Approved"}
-
     def files_under(folder):
         for path, directory in children.get(folder, []):
             if directory:
@@ -467,7 +470,8 @@ def session_tree(root: Path, sid: str, cur: str = "") -> str:
         has_index = any(p.name.lower() in ("index.html", "index.htm") for p, d in entries if not d)
         for path, directory in entries:
             if directory:
-                label = stages.get(path.name, path.name) if parent == root else path.name
+                # The real folder name, as the docs and sess commands use it.
+                label = path.name
                 # Collapsed only by default: the remembered state still wins,
                 # and the folder holding the open file always opens.
                 opened = not assets_only(path) or cur.startswith(str(path) + "/")
