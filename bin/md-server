@@ -31,7 +31,7 @@ Safety: binds 127.0.0.1 only, and every path is resolved and checked against
 ROOTS before being read. Without that this would be an arbitrary-file-read
 service listening on the loopback interface.
 """
-import argparse, html, http.server, json, mimetypes, os, socket, socketserver, subprocess, time, urllib.parse
+import argparse, html, http.server, json, mimetypes, os, socket, socketserver, subprocess, threading, time, urllib.parse
 from pathlib import Path
 
 HOME = Path.home()
@@ -348,7 +348,7 @@ def page(title: str, sidebar: str, body: str, watch: str = "", tree: str = "",
     # page when the file changes, and follows the key to another session.
     poll = f"""<script>
 let last=null,lastTree=null,seq=null;
-setInterval(async()=>{{try{{
+setInterval(async()=>{{if(document.hidden)return;try{{
  const r=await fetch('/api/tick?p={urllib.parse.quote(watch)}&tree={urllib.parse.quote(tree)}');const j=await r.json();
  seq=j.seq;
  if((last!==null&&j.mtime!==last)||(lastTree!==null&&j.tree!==lastTree))location.reload();
@@ -487,6 +487,26 @@ def session_tree(root: Path, sid: str, cur: str = "") -> str:
     return render(root) or '<div class="sub">No session files yet</div>'
 
 
+# Every open tab asks for its tree's revision each tick (1.2 s), and one walk of
+# a large session costs ~0.6 s of CPU. Walked per request, a handful of tabs
+# kept the server at 100%+ CPU and pages took 30 s. Walk each tree at most once
+# per TREE_TTL, and let concurrent askers wait for that one walk.
+TREE_TTL = 4.0
+_tree_cache: dict = {}
+_tree_lock = threading.Lock()
+
+
+def tree_revision_cached(root: Path) -> str:
+    key = str(root)
+    with _tree_lock:
+        hit = _tree_cache.get(key)
+        if hit and time.monotonic() - hit[0] < TREE_TTL:
+            return hit[1]
+        value = tree_revision(root)
+        _tree_cache[key] = (time.monotonic(), value)
+        return value
+
+
 def tree_revision(root: Path) -> str:
     """Detect nested additions, removals, renames and edits without reading bodies."""
     import hashlib
@@ -568,7 +588,7 @@ class H(http.server.BaseHTTPRequestHandler):
                 m = 0
             tree = safe(q.get("tree", [""])[0]) if q.get("tree", [""])[0] else None
             return self.send(json.dumps(
-                {"mtime": str(m), "tree": tree_revision(tree) if tree and tree.is_dir() else "",
+                {"mtime": str(m), "tree": tree_revision_cached(tree) if tree and tree.is_dir() else "",
                  "focus": FOCUS["sid"], "seq": FOCUS["seq"]}).encode(),
                 "application/json")
 
