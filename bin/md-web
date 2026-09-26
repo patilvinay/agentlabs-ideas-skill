@@ -3,15 +3,11 @@
 #
 #   md-web [PANE_ID]
 #
-# One tab, not one per keypress. The open page polls /api/tick; this sets the
-# server's focus, and the page notices and navigates itself. A browser is only
-# launched when no tab is polling — so pressing the key repeatedly, or from
-# different sessions, reuses the same tab.
-#
-# Never changes workspace. If the md-server window is on the workspace you are
-# on, it is raised there; otherwise a new browser window opens here (the old
-# tab elsewhere just follows along). Finding the window needs wmctrl; without
-# it a new window opens every time.
+# One window per session, never a jump to another workspace. If this
+# session's md-server window is on the workspace you are on, it is raised;
+# otherwise a new browser window opens here. Windows do not follow other
+# sessions' keypresses, so each keeps showing its own session. Finding the
+# window needs wmctrl; without it a new window opens every time.
 set -uo pipefail
 port="${MD_WEB_PORT:-7677}"
 srv="$HOME/.local/bin/md-server"
@@ -35,30 +31,34 @@ fi
 url="http://127.0.0.1:$port/s/$sid"
 [ -n "${MD_WEB_PRINT:-}" ] && { printf '%s\n' "$url"; exit 0; }
 
-# Point the (possibly already open) tab at this session.
+# Tell the server this session's pane directory (its sidebar lists it).
 cwd=$(tmux display -p -t "${1:-}" '#{pane_current_path}' 2>/dev/null || pwd)
-tab=$(curl -s --max-time 2 --get \
-      --data-urlencode "sid=$sid" --data-urlencode "cwd=$cwd" \
-      "http://127.0.0.1:$port/api/focus" \
-      | grep -o '"tab": *true' || true)
+curl -s --max-time 2 --get -o /dev/null \
+     --data-urlencode "sid=$sid" --data-urlencode "cwd=$cwd" \
+     "http://127.0.0.1:$port/api/focus" || true
 
-# The md-server window on the current workspace (or on all of them), if any.
-# wmctrl -a would jump to whichever workspace the window is on, so never use it
-# by title; activate by id, and only a window that is already here.
+# This session's md-server window on the current workspace, if any. Windows
+# stay on the session they show (one per session), so only ours may be raised:
+# page titles are "<session> · md-server" or "<file> · <session> · md-server".
+# wmctrl -a by title would jump workspaces; activate by id, and only if here.
 here_window() {
   command -v wmctrl >/dev/null || return 1
   local cur; cur=$(wmctrl -d 2>/dev/null | awk '$2=="*"{print $1; exit}')
   [ -n "$cur" ] || return 1
-  wmctrl -l 2>/dev/null | awk -v d="$cur" '($2==d || $2==-1) && /md-server/ {print $1; exit}' | grep .
+  wmctrl -l 2>/dev/null | awk -v d="$cur" -v t="$1" '
+    ($2==d || $2==-1) {
+      title=$0; for (i=1; i<=3; i++) sub(/^[^ ]+ +/, "", title)
+      if (index(title, t " · md-server") == 1 || index(title, " · " t " · md-server")) { print $1; exit }
+    }' | grep .
 }
 
 title=$(session-title "$sid" 2>/dev/null || echo "$sid")
-if [ -n "$tab" ] && win=$(here_window); then
-  # A tab on this workspace is polling: it navigates on its own. Raise it.
+if win=$(here_window "$title"); then
+  # This session's page is already open here: bring it forward.
   wmctrl -i -a "$win" 2>/dev/null || true
   tmux display-message "browser tab → $title" 2>/dev/null || true
 else
-  # No tab, or only on another workspace: open a new window right here. The
+  # Not open on this workspace: open a new window right here. The
   # default browser (chrome-link-here.desktop) opens links with --new-window,
   # which lands on the current workspace.
   command -v xdg-open >/dev/null && xdg-open "$url" >/dev/null 2>&1 &

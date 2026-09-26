@@ -350,7 +350,6 @@ def page(title: str, sidebar: str, body: str, watch: str = "", tree: str = "",
 let last=null,lastTree=null,seq=null;
 setInterval(async()=>{{try{{
  const r=await fetch('/api/tick?p={urllib.parse.quote(watch)}&tree={urllib.parse.quote(tree)}');const j=await r.json();
- if(seq!==null&&j.seq!==seq&&j.focus){{location.href='/s/'+j.focus;return;}}
  seq=j.seq;
  if((last!==null&&j.mtime!==last)||(lastTree!==null&&j.tree!==lastTree))location.reload();
  last=j.mtime;lastTree=j.tree;
@@ -656,7 +655,8 @@ class H(http.server.BaseHTTPRequestHandler):
                     body = f"<h1>{html.escape(f.name)}</h1>" + render_src(f)
                 if not wide:
                     body += f'<div class=meta>{html.escape(str(f))}</div>'
-                return self.send(page(f.name, sidebar_for(sid, str(f)), body, str(f),
+                # The session is in the title so md-web can tell whose window it is.
+                return self.send(page(f"{f.name} · {title_of(sid)}", sidebar_for(sid, str(f)), body, str(f),
                                       str(session_dir(sid)), wide=wide))
 
         self.send(b"not found", "text/plain", 404)

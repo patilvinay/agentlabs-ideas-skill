@@ -176,6 +176,14 @@ class SiteTests(unittest.TestCase):
         _, _, body = self.get(f"/s/{SID}")
         self.assertIn("saved.shape === shape", body)
 
+    def test_file_page_title_names_the_session(self):
+        _, _, body = self.get(f"/s/{SID}/view?p={self.session / '00-scratch/notes.md'}")
+        self.assertIn("<title>notes.md · mock-ses · md-server</title>", body)
+
+    def test_pages_do_not_follow_other_sessions(self):
+        _, _, body = self.get(f"/s/{SID}")
+        self.assertNotIn("location.href='/s/'+j.focus", body)
+
     def test_sandboxed_page_cannot_use_the_api_or_raw(self):
         f = self.mock / "style.css"
         for headers in ({"Origin": "null"}, {"Sec-Fetch-Site": "cross-site"}):
