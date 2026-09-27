@@ -36,6 +36,11 @@ class SiteTests(unittest.TestCase):
         (mock / "img/logo.svg").write_text('<svg xmlns="http://www.w3.org/2000/svg"/>')
         (cls.session / ".secret").write_text("hidden")
         (cls.session / "00-scratch/notes.md").write_text("# Notes")
+        (cls.session / "00-scratch/pay.csv").write_text(
+            'code,name,acct,amount,note,missing\n'
+            'E2,"Doe, Jane",000401234567,1200.50,"a\nb",\n'
+            'E1,Ann,000401234568,99.00,=SUM(A1:A2),PAN\n'
+            'TOTAL,,,1299.50,,\n')
         clone = cls.session / "code/some-repo"
         (clone / ".git").mkdir(parents=True)
         (clone / "src").mkdir()
@@ -183,6 +188,33 @@ class SiteTests(unittest.TestCase):
     def test_pages_do_not_follow_other_sessions(self):
         _, _, body = self.get(f"/s/{SID}")
         self.assertNotIn("location.href='/s/'+j.focus", body)
+
+    def csv_page(self, extra=""):
+        return self.get(f"/s/{SID}/view?p={self.session / '00-scratch/pay.csv'}{extra}")
+
+    def test_csv_is_a_grid_with_exact_values(self):
+        code, _, body = self.csv_page()
+        self.assertEqual(code, 200)
+        self.assertIn('<table class=grid>', body)
+        self.assertIn('<td class="text">Doe, Jane</td>', body)          # quoted comma
+        self.assertIn('<td class="id">000401234567</td>', body)         # zeros kept, text
+        self.assertIn('<td class="num">1200.50</td>', body)             # right-aligned number
+        self.assertIn('<td class="text">=SUM(A1:A2)</td>', body)        # formula is text
+        self.assertIn('<td class="text miss">PAN</td>', body)           # missing highlighted
+        self.assertIn('<td class="text e"></td>', body)                 # empty marked
+        self.assertIn("2 rows · 6 columns", body)
+
+    def test_csv_total_row_is_pinned_in_the_footer(self):
+        _, _, body = self.csv_page()
+        foot = body[body.index("<tfoot>"):body.index("</tfoot>")]
+        self.assertIn("TOTAL", foot)
+        self.assertNotIn("TOTAL", body[body.index("<tbody>"):body.index("</tbody>")])
+
+    def test_csv_raw_view_and_download(self):
+        _, _, body = self.csv_page("&src=1")
+        self.assertNotIn("<table class=grid>", body)
+        _, _, body = self.csv_page()
+        self.assertIn('download="pay.csv"', body)
 
     def test_sandboxed_page_cannot_use_the_api_or_raw(self):
         f = self.mock / "style.css"

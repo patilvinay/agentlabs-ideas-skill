@@ -130,6 +130,27 @@ aside summary{cursor:pointer;color:var(--accent);padding:5px 0;font-size:13px}
 aside .folder{margin-left:10px;border-left:1px solid var(--edge);padding-left:5px}
 main{padding:34px 44px;max-width:1100px}
 /* An HTML mockup: whole content width, whole viewport height. */
+.sheet{flex:1;min-height:0;overflow:auto;border:1px solid var(--edge);border-radius:8px}
+table.grid{border-collapse:separate;border-spacing:0;width:max-content;min-width:100%;margin:0;font-size:13px}
+table.grid th,table.grid td{border:0;border-right:1px solid var(--edge);border-bottom:1px solid var(--edge);
+padding:4px 10px;white-space:pre;vertical-align:top;background:var(--bg)}
+table.grid tbody tr:nth-child(even) td{background:#181b23}
+table.grid thead th{position:sticky;top:0;z-index:2;background:#20242f;cursor:pointer;user-select:none}
+table.grid thead tr.filters th{top:29px;cursor:default;padding:2px 4px}
+table.grid thead tr.filters input{width:100%;min-width:60px;font:inherit;font-size:12px;background:var(--bg);
+color:var(--fg);border:1px solid var(--edge);border-radius:4px;padding:1px 5px}
+table.grid th:first-child,table.grid td:first-child{position:sticky;left:0;z-index:1;border-right:2px solid var(--edge)}
+table.grid thead th:first-child{z-index:3}
+table.grid .num{text-align:right;font-family:ui-monospace,monospace}
+table.grid .id{font-family:ui-monospace,monospace}
+table.grid td.e{background:repeating-linear-gradient(135deg,#0000 0 6px,#ffffff0d 6px 8px),var(--bg)!important}
+table.grid tfoot td.e{background:repeating-linear-gradient(135deg,#0000 0 6px,#ffffff0d 6px 8px),#20242f!important}
+table.grid td.e::after{content:"–";color:#8b93a755}
+table.grid td.miss{background:#4a2330!important;color:#ffb3c1}
+table.grid tfoot td{position:sticky;bottom:0;font-weight:700;background:#20242f;border-top:2px solid var(--accent)}
+.bar input[type=search]{background:var(--bg);color:var(--fg);border:1px solid var(--edge);border-radius:6px;
+padding:3px 8px;font:inherit;width:260px}
+.bar .count{margin-left:6px}
 main.wide{max-width:none;height:100vh;padding:10px 14px;display:flex;flex-direction:column;gap:8px}
 .bar{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--dim);flex-wrap:wrap}
 .bar b{color:var(--fg);margin-right:8px;font-weight:600}
@@ -294,6 +315,107 @@ def render_src(path: Path) -> str:
     try: lex = get_lexer_for_filename(path.name)
     except Exception: lex = TextLexer()
     return highlight(path.read_text(encoding="utf-8", errors="replace"), lex, FMT)
+
+# --- CSV as a spreadsheet ------------------------------------------------------
+# Parsed here with the csv module (RFC 4180: quoted commas, quotes, newlines)
+# and rendered as a plain HTML table: every value goes through html.escape and
+# is shown exactly as written, so "000401234567" keeps its zeros, nothing turns
+# into 1.2E+11, and "=SUM(..)" is only ever text. Sorting and filtering run in
+# the page itself; nothing is fetched or sent anywhere.
+CSV_EXT = {".csv", ".tsv"}
+CSV_MAX_ROWS = 20000
+_NUMBER = __import__("re").compile(r"^[-+]?(\d{1,3}(,\d{3})+|\d+)(\.\d+)?$")
+
+
+def csv_kind(values: list) -> str:
+    """'num' (right-aligned, numeric sort), 'id' (digits kept as text, e.g.
+    account numbers with leading zeros) or 'text'."""
+    filled = [v for v in values if v != ""]
+    if not filled or not all(_NUMBER.match(v) for v in filled):
+        return "text"
+    if any(len(v) > 1 and v[0] == "0" and v[1].isdigit() for v in filled):
+        return "id"
+    return "num"
+
+
+def render_csv(path: Path, here: str) -> str:
+    import csv, io
+    raw = path.read_text(encoding="utf-8-sig", errors="replace")
+    delim = "\t" if path.suffix.lower() == ".tsv" else ","
+    rows = list(csv.reader(io.StringIO(raw, newline=""), delimiter=delim))
+    if not rows:
+        return f"<h1>{html.escape(path.name)}</h1><p class=sub>empty file</p>"
+    head, body = rows[0], rows[1:]
+    width = max(len(r) for r in rows)
+    head += [""] * (width - len(head))
+    body = [r + [""] * (width - len(r)) for r in body]
+    total = [r for r in body if r and r[0].strip().upper() == "TOTAL"]
+    body = [r for r in body if not (r and r[0].strip().upper() == "TOTAL")]
+    clipped = len(body) > CSV_MAX_ROWS
+    body = body[:CSV_MAX_ROWS]
+    kinds = [csv_kind([r[i] for r in body]) for i in range(width)]
+    missing = [("missing" in h.lower()) for h in head]
+
+    def cell(v, i, tag="td"):
+        cls = [kinds[i]]
+        if v == "": cls.append("e")
+        elif missing[i]: cls.append("miss")
+        return f'<{tag} class="{" ".join(cls)}">{html.escape(v)}</{tag}>'
+
+    th = "".join(f'<th class="{kinds[i]}" data-i="{i}" title="sort">{html.escape(h)}<span class=arrow></span></th>'
+                 for i, h in enumerate(head))
+    filt = "".join(f'<th><input data-i="{i}" placeholder="filter" aria-label="filter {html.escape(h)}"></th>'
+                   for i, h in enumerate(head))
+    trs = "".join("<tr>" + "".join(cell(v, i) for i, v in enumerate(r)) + "</tr>" for r in body)
+    foot = "".join("<tr>" + "".join(cell(v, i) for i, v in enumerate(r)) + "</tr>" for r in total)
+    note = f" · first {CSV_MAX_ROWS} shown" if clipped else ""
+    return (f'<div class=bar><b title="{html.escape(str(path))}">{html.escape(path.name)}</b>'
+            f'<input id=q type=search placeholder="filter all columns" autocomplete=off>'
+            f'<span id=count class=count>{len(body)} rows · {width} columns{note}</span><span class=gap></span>'
+            f'<a href="/raw?p={urllib.parse.quote(str(path))}" download="{html.escape(path.name)}">Download CSV</a>'
+            f'<a href="?p={here}&amp;src=1">Raw text</a></div>'
+            f'<div class=sheet><table class=grid><thead><tr>{th}</tr><tr class=filters>{filt}</tr></thead>'
+            f'<tbody>{trs}</tbody><tfoot>{foot}</tfoot></table></div>' + CSV_SCRIPT)
+
+
+CSV_SCRIPT = r"""<script>
+(() => {
+ const table = document.querySelector('table.grid'), body = table.tBodies[0];
+ const rows = [...body.rows], heads = [...table.tHead.rows[0].cells];
+ const q = document.getElementById('q'), count = document.getElementById('count');
+ const cols = [...table.tHead.rows[1].querySelectorAll('input')];
+ const total = rows.length, label = count.textContent;
+ const num = v => parseFloat(v.replace(/,/g, ''));
+ let key = -1, dir = 1;
+ function apply() {
+   const all = q.value.trim().toLowerCase();
+   const per = cols.map(c => c.value.trim().toLowerCase());
+   let shown = 0;
+   for (const r of rows) {
+     const cells = [...r.cells].map(c => c.textContent.toLowerCase());
+     const ok = (!all || cells.some(c => c.includes(all))) && per.every((f, i) => !f || cells[i].includes(f));
+     r.hidden = !ok; if (ok) shown++;
+   }
+   count.textContent = shown === total ? label : `${shown} of ${total} rows`;
+ }
+ function sort(i) {
+   dir = key === i ? -dir : 1; key = i;
+   const numeric = heads[i].classList.contains('num');
+   const val = r => r.cells[i].textContent;
+   rows.sort((a, b) => {
+     const x = val(a), y = val(b);
+     if (x === '' || y === '') return (x === '') - (y === '');   // blanks last
+     return dir * (numeric ? num(x) - num(y) : x.localeCompare(y, undefined, {numeric: true}));
+   });
+   body.append(...rows);
+   heads.forEach((h, j) => h.querySelector('.arrow').textContent = j === i ? (dir > 0 ? ' ▲' : ' ▼') : '');
+ }
+ heads.forEach((h, i) => h.addEventListener('click', () => sort(i)));
+ q.addEventListener('input', apply);
+ cols.forEach(c => c.addEventListener('input', apply));
+})();
+</script>"""
+
 
 MERMAID = """<script type="module">
 import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
@@ -644,6 +766,9 @@ class H(http.server.BaseHTTPRequestHandler):
                 source = q.get("src") or q.get("view", [""])[0] == "source"
                 if ext in (".md", ".markdown"):
                     body = render_md(f)
+                elif ext in CSV_EXT and not source:
+                    body = render_csv(f, urllib.parse.quote(str(f)))
+                    wide = True
                 elif site and not source:
                     # A mockup: run it, framed and sandboxed. Links inside it
                     # navigate the frame; "new tab" gives it the whole window.
