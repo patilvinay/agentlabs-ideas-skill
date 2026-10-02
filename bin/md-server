@@ -473,9 +473,18 @@ let last=null,lastTree=null,seq=null;
 setInterval(async()=>{{if(document.hidden)return;try{{
  const r=await fetch('/api/tick?p={urllib.parse.quote(watch)}&tree={urllib.parse.quote(tree)}');const j=await r.json();
  seq=j.seq;
- if((last!==null&&j.mtime!==last)||(lastTree!==null&&j.tree!==lastTree))location.reload();
+ if((last!==null&&j.mtime!==last)||(lastTree!==null&&j.tree!==lastTree))refresh();
  last=j.mtime;lastTree=j.tree;
-}}catch(e){{}}}},1200);</script>"""
+}}catch(e){{}}}},1200);
+// A reload would throw away a video someone is watching, so while any media
+// has been started and not finished, offer the reload instead of doing it.
+function watching(){{return[...document.querySelectorAll('video,audio')].some(m=>m.currentTime>0&&!m.ended);}}
+function refresh(){{if(!watching()){{location.reload();return;}}
+ if(document.getElementById('stale'))return;
+ const b=document.createElement('button');b.id='stale';b.textContent='updated · reload';
+ b.style.cssText='position:fixed;right:16px;bottom:16px;z-index:9;padding:6px 12px;border-radius:16px;border:1px solid #888;background:#fffbe6;color:#333;cursor:pointer;font:13px sans-serif';
+ b.onclick=()=>location.reload();document.body.appendChild(b);}}
+document.addEventListener('ended',()=>{{if(document.getElementById('stale')&&!watching())location.reload();}},true);</script>"""
     return f"""<!doctype html><meta charset=utf-8>
 <title>{html.escape(title)} · md-server</title>
 <style>{CSS}{FMT.get_style_defs('.hl')}</style>

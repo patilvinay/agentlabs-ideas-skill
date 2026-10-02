@@ -225,10 +225,6 @@ class SiteTests(unittest.TestCase):
         # The md-server page itself (same-origin) still can.
         self.assertEqual(self.get(f"/raw?p={f}", {"Sec-Fetch-Site": "same-origin"})[0], 200)
 
-
-if __name__ == "__main__":
-    unittest.main()
-
     def test_raw_honours_byte_ranges_so_media_can_seek(self):
         f = self.session / "00-scratch/clip.mp4"
         whole = f.read_bytes()
@@ -247,3 +243,14 @@ if __name__ == "__main__":
             urllib.request.urlopen(req, timeout=5)
         self.assertEqual(e.exception.code, 416)
 
+    def test_a_playing_video_is_not_interrupted_by_a_reload(self):
+        # The page refreshes when the session changes; while media is in
+        # progress it must offer the reload, not do it.
+        _, _, body = self.get("/")
+        self.assertIn("function watching()", body)
+        self.assertIn("refresh();", body)
+        self.assertNotIn("j.tree!==lastTree))location.reload()", body)
+
+
+if __name__ == "__main__":
+    unittest.main()
