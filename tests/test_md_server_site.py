@@ -34,6 +34,7 @@ class SiteTests(unittest.TestCase):
         (mock / "style.css").write_text("body{color:red}")
         (mock / "app.js").write_text("console.log(1)")
         (mock / "img/logo.svg").write_text('<svg xmlns="http://www.w3.org/2000/svg"/>')
+        (cls.session / "00-scratch/clip.mp4").write_bytes(bytes(range(256)) * 4)
         (cls.session / ".secret").write_text("hidden")
         (cls.session / "00-scratch/notes.md").write_text("# Notes")
         (cls.session / "00-scratch/pay.csv").write_text(
@@ -227,3 +228,22 @@ class SiteTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+    def test_raw_honours_byte_ranges_so_media_can_seek(self):
+        f = self.session / "00-scratch/clip.mp4"
+        whole = f.read_bytes()
+        code, headers, _ = self.get(f"/raw?p={f}")
+        self.assertEqual((code, headers["Accept-Ranges"], headers["Content-Type"]), (200, "bytes", "video/mp4"))
+        req = urllib.request.Request(f"http://127.0.0.1:{self.port}/raw?p={f}", headers={"Range": "bytes=100-199"})
+        with urllib.request.urlopen(req, timeout=5) as r:
+            self.assertEqual(r.status, 206)
+            self.assertEqual(r.headers["Content-Range"], f"bytes 100-199/{len(whole)}")
+            self.assertEqual(r.read(), whole[100:200])
+        req = urllib.request.Request(f"http://127.0.0.1:{self.port}/raw?p={f}", headers={"Range": "bytes=-24"})
+        with urllib.request.urlopen(req, timeout=5) as r:
+            self.assertEqual((r.status, r.read()), (206, whole[-24:]))
+        req = urllib.request.Request(f"http://127.0.0.1:{self.port}/raw?p={f}", headers={"Range": f"bytes={len(whole)}-"})
+        with self.assertRaises(urllib.error.HTTPError) as e:
+            urllib.request.urlopen(req, timeout=5)
+        self.assertEqual(e.exception.code, 416)
+
