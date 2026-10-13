@@ -39,6 +39,7 @@ ok "markdown-it-py, mdit-py-plugins, pygments, linkify-it-py"
 say "Installing to $HOOKS, $BINDIR and $LIBDIR"
 mkdir -p "$HOOKS" "$BINDIR" "$LIBDIR" "$HOME/.config/agentlabs"
 install -m 0644 "$REPO"/lib/agent.sh "$LIBDIR"/agent.sh
+install -m 0644 "$REPO"/lib/transcript.py "$LIBDIR"/transcript.py
 install -m 0755 "$REPO"/hooks/*.sh "$HOOKS"/
 install -m 0755 "$REPO"/bin/*      "$BINDIR"/
 printf '%s\n' "$REPO" > "$HOME/.config/agentlabs/ideas-repo"

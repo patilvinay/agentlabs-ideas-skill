@@ -6,13 +6,8 @@
 # TMUX_PANE is EMPTY inside tmux run-shell bindings and display-popup, so the
 # pane is passed in by whatever binding calls this.
 #
-# Resolution order, most trustworthy first:
-#   1. panes in this window currently running an agent, newest mapping first
-#   2. any other pane in this window, newest mapping first
-#   3. the calling pane itself
-#   4. the newest transcript this agent knows about
-# Panes keep their mapping after the agent moves elsewhere, so a stale entry can
-# otherwise outlive the session it named.
+# The transcript owner selects ~/.codex/scratch or ~/.claude/scratch. A supplied
+# pane uses the existing window-neighbour fallback for this legacy navigator.
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 for c in "$HERE/../lib/agent.sh" "$HOME/.local/lib/agentlabs/agent.sh"; do
@@ -20,9 +15,9 @@ for c in "$HERE/../lib/agent.sh" "$HOME/.local/lib/agentlabs/agent.sh"; do
 done
 command -v agent_pane_transcript >/dev/null || { echo "session-dir: lib/agent.sh not found" >&2; exit 1; }
 
-root="${AGENTLABS_SESSIONS:-$HOME/.claude/scratch}"   # NOT ~/.claude/sessions: Claude Code owns that
 pane="${1:-${TMUX_PANE:-}}"
 sid=""
+t=""
 
 candidates() {
   local win
@@ -53,6 +48,7 @@ if [ -z "$sid" ]; then
 fi
 [ -n "$sid" ] || { echo "session-dir: no agent session found for this pane" >&2; exit 1; }
 
+root="${AGENTLABS_SESSIONS:-$(agent_session_root "$t")}" # scratch, never an agent-owned transcript store
 d="$root/$sid"
 mkdir -p "$d/00-scratch" "$d/10-review" "$d/20-approved"
 printf '%s\n' "$d"

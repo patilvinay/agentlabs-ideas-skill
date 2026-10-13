@@ -9,7 +9,8 @@ Long documents do not belong in a reply: they scroll away, cannot be edited,
 and have to be copied by hand to become real. Each agent session has a
 workspace instead.
 
-    ~/.claude/scratch/<session-id>/
+    ~/.codex/scratch/<session-id>/       # Codex
+    ~/.claude/scratch/<session-id>/      # Claude Code
       00-scratch/    drafts — write here freely, nothing is final
       10-review/     the user is refining these
       20-approved/   signed off, ready to ship

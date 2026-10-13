@@ -28,7 +28,8 @@ Flags: `--no-sudo` (report missing packages instead of installing them),
 ## The workflow
 
 ```
-~/.claude/scratch/<session-id>/
+~/.codex/scratch/<session-id>/       # Codex
+~/.claude/scratch/<session-id>/      # Claude Code
   00-scratch/    drafts — the agent writes here, nothing is final
   10-review/     you are refining these
   20-approved/   signed off, ready to ship
@@ -50,7 +51,7 @@ into the reply.
 
 `prefix w` opens `http://127.0.0.1:7677/s/<session-id>`.
 
-One small server handles every session. The open page polls it, so pressing the
+One small server handles Codex and Claude sessions. The open page polls it, so pressing the
 key again — or in a different session — moves that same tab instead of opening
 another. With `wmctrl` present the window is raised too.
 
@@ -86,7 +87,8 @@ in sight. A reply without one leaves the panel alone.
 | **Codex CLI** | adapter included, **not yet verified** — no Codex on the machine this was built on |
 
 Everything agent-specific is in `lib/agent.sh`: where transcripts live and how
-a session is named. Nothing else names an agent.
+a session is named. Codex titles come from `~/.codex/session_index.jsonl`;
+Claude titles come from its project metadata. Nothing else names an agent.
 
 ## Third-party services
 
